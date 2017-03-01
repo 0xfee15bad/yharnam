@@ -64,5 +64,6 @@ STACK_STORAGE STRUCT
     targetName              BYTE MAX_PATH dup(?)
     fileStruct              WIN32_FIND_DATA <?>
     searchHandle            HANDLE ?
+    GPAAddr                 DWORD ?
 STACK_STORAGE ENDS
 ;;
