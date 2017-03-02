@@ -64,6 +64,7 @@ STACK_STORAGE STRUCT
     targetName              BYTE MAX_PATH dup(?)
     fileStruct              WIN32_FIND_DATA <?>
     searchHandle            HANDLE ?
-    GPAAddr                 DWORD ?
+    kernel32BaseAddr        HMODULE ?
+    GetProcAddress_addr     DWORD ?
 STACK_STORAGE ENDS
 ;;

