@@ -2,14 +2,13 @@
 ;
 ; 	- 0xfee15bad (Alexandre Paillier)
 ;
+
+
+; Re-definition of internal Windows structures
+; not included in Masm32
 ; https://msdn.microsoft.com/en-us/library/windows/desktop/aa813706.aspx
 ; https://msdn.microsoft.com/en-us/library/windows/desktop/aa813708.aspx
 ; https://msdn.microsoft.com/en-us/library/windows/desktop/aa380518.aspx
-;
-
-
-; Re-definition of internal Windows structures and types
-; not included in Masm32
 
 PEB_LDR_DATA STRUCT
     Reserved1               BYTE 8 dup(?)
@@ -19,7 +18,7 @@ PEB_LDR_DATA ENDS
 
 UNICODE_STRING STRUCT
     Len                     USHORT ? ; is Length, but conflicts with the LENGTH Masm keyword
-    MaximumLen              USHORT ? ; is MaximumLength, but for consistency
+    MaximumLen              USHORT ? ; is MaximumLength, for consistency
     Buffer                  PWSTR ?
 UNICODE_STRING ENDS
 
@@ -56,7 +55,7 @@ PEB STRUCT
     SessionId               ULONG ?
 PEB ENDS
 
-; Stack layout during execution
+; Stack layout
 ; Used to make the code a little bit cleaner
 
 STACK_STORAGE STRUCT

