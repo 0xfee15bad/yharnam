@@ -68,5 +68,7 @@ STACK_STORAGE STRUCT
     fileHandle              HANDLE ?
     fileMappingHandle       HANDLE ?
     fileView                LPVOID ?
+    fileSize                DWORD ?
+    offsetToDest            DWORD ?
 STACK_STORAGE ENDS
 ;;
