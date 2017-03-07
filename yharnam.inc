@@ -70,5 +70,6 @@ STACK_STORAGE STRUCT
     fileView                LPVOID ?
     fileSize                DWORD ?
     offsetToDest            DWORD ?
+    origEntryPoint          DWORD ?
 STACK_STORAGE ENDS
 ;;
